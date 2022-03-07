@@ -6,7 +6,7 @@ import numpy as np
 import pandas as pd
 import os
 from Sampler.Dataloader import get_data_seed
-from models.WideLinear import Net
+from models.MLP import MLP
 from Transfer.Transfer import Multi_GRL
 from Optimizer.AdaBoud import AdaBound
 
@@ -96,9 +96,11 @@ def train(myNet, source_loader, subject):
         """
         with torch.cuda.amp.autocast(enabled=False):
             loss1, loss2, acc = myNet(source_data, source_label, subject_mark, subject_label, subject)
-        loss_total = loss1+loss2*0.1
-
+        loss_total = loss1 + loss2
         loss_total.backward(retain_graph=False)
+        # for name,parameter in myNet.named_parameters():
+        #     if parameter.grad is not None:
+        #         print(name,parameter.grad.norm())
         optimizer.step()
         loss += loss_total.clone().detach().item()
         correct += acc
@@ -124,7 +126,7 @@ if __name__ == '__main__':
     else:
         raise NotImplementedError
     ALL_SUBJECT_ACC = []
-    ALL_BSET_ACC=[]
+    ALL_BSET_ACC = []
     for i in range(total):
         scaler = torch.cuda.amp.GradScaler()
         """
@@ -134,23 +136,26 @@ if __name__ == '__main__':
         """
         生成特征提取器
         """
-        extractor = Net(3, 310, 5, 180, 64, 100, 0, 0.9, True)
+        extractor = MLP(310 * 180, 1024, 1)
         """
         生成完整架构，第一个参数是特征提取器，第二个参数是特征提取器输出的特征数量，第三个是人数，第四个是类别数
         """
-        myNet = Multi_GRL(extractor, 100 * 100 * 64, 15, 3)
-        myNet.class_predictor = nn.Linear(100 * 100 * 64, 3)
-        myNet.subject_predictor = nn.Linear(100 * 100 * 64, 15)
+        myNet = Multi_GRL(extractor, 310 * 180, 15, 3)
+        # myNet.class_predictor = nn.Linear(310 * 180, 3)
+        # myNet.subject_predictor = nn.Linear(310 * 180, 15)
         myNet = myNet.cuda()
-        # optimizer = optim.AdamW(myNet.parameters(), lr=4 * 0.0001)
-        optimizer = AdaBound(myNet.parameters(), lr=4 * 0.0001,betas=(0.5,0.999),)
+        optimizer = AdaBound([{"params":myNet.subject_predictor.parameters(),"weight_decay":0},
+                              {"params":myNet.class_predictor.parameters()},
+                              {"params":myNet.extractor.parameters()}],lr=0.00004,final_lr=0.004,betas=(0.0,0.9))
+        # optimizer = AdaBound(myNet.parameters(),lr=0.00004,final_lr=0.004,betas=(0.0,0.9))
+        # optimizer = torch.optim.SGD(myNet.p)
         scheduler = torch.optim.lr_scheduler.MultiStepLR(optimizer, [600], 0.1)
         train_accuracy = []
         test_accuracy = []
         e_error = []
         for epoch in range(1, args.nEpoch + 1):
             train(myNet, source_loader, i)
-            #scheduler.step()
+            # scheduler.step()
             test_acc = test(myNet, target_loader)
             test_accuracy.append(round(test_acc, 3))
             test_info = 'Test acc Epoch{}: {:.3f}'.format(epoch, test_acc)
@@ -161,6 +166,17 @@ if __name__ == '__main__':
         ALL_BSET_ACC.append(best_acc)
         print(f"last acc is:{last_ACC}%,best acc is:{best_acc}")
     ALL_SUBJECT_ACC = np.array(ALL_SUBJECT_ACC)
-    ALL_BSET_ACC=np.array(ALL_BSET_ACC)
+    ALL_BSET_ACC = np.array(ALL_BSET_ACC)
     print(f"the last mean acc is {ALL_SUBJECT_ACC.mean()}%,the last std acc is {ALL_SUBJECT_ACC.std()}%\n"
           f"the best mean acc is {ALL_BSET_ACC.mean()}%,the best std acc is {ALL_BSET_ACC.std()}%")
+"""
+the best mean acc is 80.1482%,the best std acc is 9.016420081902426%
+the best mean acc is 79.8518%,the best std acc is 9.161231374293159%
+the best mean acc is 78.51846666666665%,the best std acc is 7.640702505805485%
+the best mean acc is 80.0%,the best std acc is 6.83730989985584%
+the best mean acc is 80.88886666666666%,the best std acc is 7.383621522140896%
+avg mean acc is 79.8814%, avg std acc is 8.0079%
+
+Transfer:
+the best mean acc is 81.1852%,the best std acc is 8.18980450071917%
+"""

@@ -53,7 +53,7 @@ class Multi_GRL(nn.Module):
             nn.ReLU(inplace=True),
             nn.Linear(1024, subject_nums)
         ])
-        self.betas = 0.5
+        self.betas = 1
 
     def forward(self, x, y, subject_mask, subject_label, subject):
         """
