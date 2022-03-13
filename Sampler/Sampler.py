@@ -49,15 +49,18 @@ class RandomIdentitySampler(Sampler):
                 if len(batch_idxs) == self.num_instances:
                     batch_idxs_dict[subject].append(batch_idxs)
                     batch_idxs = []
+            if len(batch_idxs)!=0:
+                batch_idxs_dict[subject].append(batch_idxs)
         avai_subjects = copy.deepcopy(self.subjects)
         final_idxs = []
         copy_avai_subjects=copy.deepcopy(avai_subjects)
-        for subject in copy_avai_subjects:
-            batch_idxs = batch_idxs_dict[subject].pop(0)
-            final_idxs.extend(batch_idxs)
-            if len(batch_idxs_dict[subject]) == 0:
-                avai_subjects.remove(subject)
-        assert len(avai_subjects)==0 or len(avai_subjects)==self.subject_nums,"there are subjects whose samples are not entered"
+        while len(avai_subjects)!=0:
+            for subject in copy_avai_subjects:
+                batch_idxs = batch_idxs_dict[subject].pop(0)
+                final_idxs.extend(batch_idxs)
+                if len(batch_idxs_dict[subject]) == 0:
+                    avai_subjects.remove(subject)
+        assert len(avai_subjects)==0,"there are subjects whose samples are not entered"
         self.length = len(final_idxs)
         return iter(final_idxs)
     def __len__(self):

@@ -36,7 +36,7 @@ class TrainDataset(Dataset):
         if self.name=="seed":
             self.subject_mark=np.load("./HelpFile/subject_label.npy").astype(float)
         elif self.name=="deap":
-            raise NotImplementedError("Not import")
+            self.subject_mark = np.eye(subject_number).astype(float)
         else:
             raise NotImplementedError("Not import")
         self.one_subject_number=(self.data.shape[0]//subject_number)

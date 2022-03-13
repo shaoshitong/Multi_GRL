@@ -1,9 +1,9 @@
-import torch, math
+import torch, math,random
 import torch.nn as nn
 import torch.nn.functional as F
 from einops import rearrange
-
-
+from utils.mmd import mmd
+from torch.utils.checkpoint import checkpoint
 class crossentropy(object):
     def __init__(self):
         pass
@@ -37,25 +37,38 @@ def normalize(feature,eps):
     norm=torch.norm(feature,2,1,keepdim=True)+eps
     feature=torch.div(feature,norm)
     return feature
+
+class ResMLP(nn.Module):
+    def __init__(self,in_channels,out_channels):
+        super(ResMLP,self).__init__()
+        self.mlp=nn.Sequential(nn.Linear(in_channels,32),
+                               nn.ReLU(inplace=True),
+                               nn.Linear(32,out_channels))
+        self.shortcut=nn.Linear(in_channels,out_channels)
+        self.in_channels=in_channels
+        self.out_channels=out_channels
+    def forward(self,x):
+        y=self.mlp(x)+self.shortcut(x)
+        return y
+
 class Multi_GRL(nn.Module):
     def __init__(self, extractor, in_channels, subject_nums, num_classes):
         super(Multi_GRL, self).__init__()
         self.extractor = nn.Sequential(extractor, nn.Flatten())
         self.in_channels = in_channels
         self.subject_nums = subject_nums
-        self.class_predictor = nn.Sequential(*[
-            nn.Linear(in_channels, 1024),
-            nn.ReLU(inplace=True),
-            nn.Linear(1024, num_classes)
-        ])
-        self.subject_predictor = nn.Sequential(*[
-            nn.Linear(in_channels, 1024),
-            nn.ReLU(inplace=True),
-            nn.Linear(1024, subject_nums)
-        ])
+        self.subject_addblock=nn.ModuleList([])
+        for i in range(subject_nums):
+            layer=nn.Linear(in_channels,512)
+            self.subject_addblock.append(layer)
+        self.subject_class_predictor=nn.ModuleList([])
+        for i in range(subject_nums):
+            layer=nn.Sequential(nn.ReLU(inplace=False),nn.Linear(512,num_classes))
+            self.subject_class_predictor.append(layer)
+        self.subject_domain_predictor=ResMLP(512,subject_nums)
         self.betas = 1
 
-    def forward(self, x, y, subject_mask, subject_label, subject):
+    def forward(self, x, y, subject_label, subject):
         """
         :param x: 输入样本
         :param y: 情绪类别
@@ -64,32 +77,61 @@ class Multi_GRL(nn.Module):
         :param subject: 当前目标域身份
         :return: 在训练阶段会返回两个loss和一个correct,测试阶段只返回一个correct
         """
-        if self.training == True:
-            x = self.extractor(x)
-            label_out = self.class_predictor(x)
-            subject_out = self.subject_predictor(ReverseLayerF.apply(x, 0.95))  # b,15
-            # subject_out=rearrange(subject_out, "(s i) v -> s i v", s=subject_mask.shape[1]).mean(1)
-            subject_out = torch.nn.functional.softmax(subject_out, dim=1)
-            subject_mask = -torch.log(1 / (subject_mask) - 1)
-            subject_mask = subject_mask - subject_mask.min(dim=-1, keepdim=True)[0]
-            # subject_mask = rearrange(subject_mask, "(s i) v -> s i v", s=subject_mask.shape[1]).mean(1)
-            subject_mask = (subject_mask.max(dim=-1, keepdim=True)[0] - subject_mask)
-            subject_mask = subject_mask / subject_mask.sum(-1, keepdim=True)
-            yin_subject_mask = torch.eye(subject_mask.shape[1], dtype=torch.float).to(subject_mask.device).unsqueeze(
-                1).repeat(1, int(subject_mask.shape[0] / subject_mask.shape[1]), 1).view(-1, subject_mask.shape[-1])
-            loss_subject_1 = F.mse_loss(subject_out, subject_mask,size_average=False, reduction="none")
-            loss_subject_2 = F.mse_loss(subject_out, yin_subject_mask, size_average=False,reduction="none")
-            loss_subject = self.betas * loss_subject_1 + (1. - self.betas) * loss_subject_2
-            use = ~torch.eq(torch.LongTensor([subject]).to(subject_label.device), subject_label)
-            y = y.long()[use]
-            label_out = label_out[use]
-            loss_class = crossentropy()(label_out, y)
-            pred = torch.argmax(label_out, dim=1)
-            correct = 100 * torch.eq(pred, y.argmax(1)).float().sum().item() / pred.shape[0]
-            return loss_class, loss_subject*0.5, correct
-        else:
-            x = self.extractor(x)
-            label_out = self.class_predictor(x)
-            pred = torch.argmax(label_out, dim=1)
-            correct = 100 * torch.eq(pred, y.argmax(1)).float().sum().item() / pred.shape[0]
-            return correct
+        x = self.extractor(x)
+        return self.TL(x,y,subject_label,subject)
+    def TL(self,x,y,subject_label,subject):
+        target_mask = torch.eq(torch.LongTensor([subject]).to(subject_label.device), subject_label)
+        subject_batch_num = target_mask.sum().item()
+        outs = []
+        for i in range(self.subject_nums):
+            if i == subject:
+                continue
+            subject_x = x[i * subject_batch_num:(i + 1) * subject_batch_num]
+            subject_x = self.subject_addblock[i](subject_x)
+            outs.append(subject_x)
+        target_outs = []
+        for i in range(self.subject_nums):
+            if i == subject:
+                continue
+            subject_target = x[subject * subject_batch_num:(subject + 1) * subject_batch_num]
+            subject_target = self.subject_addblock[i](subject_target)
+            target_outs.append(subject_target)
+        logits = []
+        target_logits = []
+        for i in range(self.subject_nums - 1):
+            subject_logit = outs[i]
+            # subject_logit=x[i*subject_batch_num:(i+1)*subject_batch_num]
+            subject_logit = self.subject_class_predictor[i](subject_logit)
+            logits.append(subject_logit)
+            target_logit = target_outs[i]
+            # target_logit=x[subject*subject_batch_num:(subject+1)*subject_batch_num]
+            target_logit = self.subject_class_predictor[i](target_logit)
+            target_logits.append(target_logit)
+        "====================================================MMD LOSS====================================================="
+        mmd_loss = 0.
+        for source_out, target_out in zip(outs, target_outs):
+            mmd_loss_one = mmd(source_out, target_out)
+            mmd_loss = mmd_loss + mmd_loss_one
+        mmd_loss = mmd_loss / (self.subject_nums - 1)
+        "====================================================DISC LOSS====================================================="
+        disc_loss = 0.
+        for i in range(self.subject_nums - 1):
+            for j in range(i + 1, self.subject_nums - 1):
+                disc_loss = disc_loss + (F.softmax(outs[i], dim=1) - F.softmax(outs[j], dim=1)).abs().mean()
+        disc_loss = disc_loss * 2 / ((self.subject_nums - 1) * (self.subject_nums - 2))
+        "====================================================CLS LOSS====================================================="
+        count = 0
+        cls_loss = 0.
+        for i in range(self.subject_nums):
+            if i == subject:
+                continue
+            count += 1
+            subject_target = y[i * subject_batch_num:(i + 1) * subject_batch_num]
+            cls_loss = cls_loss + crossentropy()(logits[count - 1], subject_target)
+        cls_loss = cls_loss / (self.subject_nums - 1)
+        "====================================================PRED ACC====================================================="
+        target_logit = torch.softmax(torch.stack(target_logits, -1), 1).mean(-1)
+        target_true = y[subject * subject_batch_num:(subject + 1) * subject_batch_num]
+        pred = torch.eq(torch.argmax(target_logit, 1), torch.argmax(target_true, 1))
+        pred, nums = pred.sum(), pred.shape[0]
+        return mmd_loss * 0.1, disc_loss * 0.4, cls_loss, pred, nums
