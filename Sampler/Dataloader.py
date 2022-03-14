@@ -56,6 +56,6 @@ def get_data_seed(sample_path, subject_number, i, num_classes, batchsize=128):
     nums_instance=int(batchsize//subject_number)
     batchsize=nums_instance*subject_number
     Sampler=RandomIdentitySampler(source,subject_number,nums_instance)
-    source_loader = DataLoader(source, sampler=Sampler,batch_size=batchsize, drop_last=False)
-    target_loader = DataLoader(target, batch_size=batchsize, shuffle=True, drop_last=False)
+    source_loader = DataLoader(source, sampler=Sampler,batch_size=batchsize, drop_last=False,num_workers=2)
+    target_loader = DataLoader(target, batch_size=batchsize, shuffle=True, drop_last=False,num_workers=0)
     return source_loader, target_loader

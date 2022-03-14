@@ -12,7 +12,7 @@ from Transfer.Transfer import Multi_GRL
 from Optimizer.AdaBoud import AdaBound
 parser = argparse.ArgumentParser()  # 创建对象
 parser.add_argument('--cuda', type=int, default=0)
-parser.add_argument('--nEpoch', type=int, default=200)
+parser.add_argument('--nEpoch', type=int, default=400)
 
 args = parser.parse_args()
 
@@ -80,7 +80,9 @@ def train(myNet, source_loader,subject):
     myNet.train()
     global now_i,iteration,scaler
     correct=0
-    loss=0
+    cls_total_loss=0
+    mmd_total_loss=0
+    disc_total_loss=0
     """
     source_data:样本
     source_label:标签
@@ -99,30 +101,33 @@ def train(myNet, source_loader,subject):
         # optimizer.param_groups[1]['lr'] = 0.002 / math.pow((1 + 2 * (now_i - 1) / (iteration)), 0.75)
         # optimizer.param_groups[2]['lr'] = 0.002 / math.pow((1 + 2 * (now_i - 1) / (iteration)), 0.75)
         now_i+=1
+        global top_num
         with torch.cuda.amp.autocast(enabled=True):
-            mmd_loss,disc_loss,cls_loss,pred,nums= myNet(source_data,source_label,subject_label,subject)
-        loss_total=cls_loss#+global_weight*(mmd_loss+disc_loss)
+            mmd_loss,disc_loss,cls_loss,pred,nums= myNet(source_data,source_label,subject_label,subject,top_num)
+        loss_total=cls_loss+global_weight*(mmd_loss+disc_loss)
         # print("subject",subject,"mmd",mmd_loss.item(),"disc",disc_loss.item(),"cls",cls_loss.item(),'pred',pred.item()*100)
         scaler.scale(loss_total).backward()
         scaler.step(optimizer)
         scaler.update()
-        loss=loss+loss_total.clone().detach().cpu().item()
+        cls_total_loss=cls_total_loss+cls_loss.clone().detach().cpu().item()
+        mmd_total_loss=mmd_total_loss+mmd_loss.clone().detach().cpu().item()
+        disc_total_loss=disc_total_loss+disc_loss.clone().detach().cpu().item()
         correct=correct+pred.clone().detach().cpu().item()
         len_data+=nums
     correct=correct*100
     train_acc = correct / len_data
     train_acc1 = round(train_acc, 3)
     train_accuracy.append(train_acc1)
-    item_pr = 'Train Epoch: [{}/{}], total_loss: {:.3f} epoch{}_Acc: {:.3f}%, iter:{}, lr:{}' \
-        .format(epoch, args.nEpoch, loss/len(source_loader), epoch, train_acc,global_weight,optimizer.param_groups[0]['lr'])
+    item_pr = 'Train Epoch: [{}/{}], cls_loss: {:.3f}, mmd_loss: {:.3f}, disc_loss: {:.3f}, epoch{}_Acc: {:.3f}%, iter:{}' \
+        .format(epoch, args.nEpoch, cls_total_loss/len(source_loader),mmd_total_loss/len(source_loader),disc_total_loss/len(source_loader), epoch, train_acc,global_weight)
     print(item_pr)
     return train_acc
 
 if __name__ == '__main__':
-    torch.cuda.empty_cache()
+
     mode = 'SEED'
-    sample_path = 'G:/Alex/SEED_experiment/Three sessions sample/DE_4D/'
-    path = "G:/Alex/SEED_experiment/Backbone_contrast/Transformer/result/experiment1"
+    sample_path = '/data/EEG/DE_4D/'
+    path = '/home/sst/log/EEG/'
     if not os.path.isdir(path):
         os.mkdir(path)
     if mode == 'DEAP':
@@ -131,15 +136,19 @@ if __name__ == '__main__':
         total = 15
     else:
         raise NotImplementedError
+    top_num=5
     for m in range(5):
         ALL_SUBJECT_ACC = []
         ALL_BSET_ACC = []
         for i in range(total):
+            torch.cuda.empty_cache()
+            torch.backends.cudnn.benchmark = True
+            torch.backends.cudnn.fastest = True
             """
             首先获取数据集，第一个参数是路径，第二个参数是人数，第三个是现在目标域是第几个人，第四个类别数，第五个batchsize
             """
             scaler=torch.cuda.amp.GradScaler()
-            source_loader,target_loader=get_data_seed(sample_path,15,i,3,256)
+            source_loader,target_loader=get_data_seed(sample_path,15,i,3,225)
             """
             生成特征提取器
             """
@@ -151,11 +160,10 @@ if __name__ == '__main__':
             now_i=0
             myNet = Multi_GRL(extractor,310*180,15,3).cuda()
             optimizer = optim.SGD([
-                {'params':myNet.extractor.parameters(),'lr':0.001,'final_lr':0.001},
-                {'params': myNet.subject_class_predictor.parameters(), 'lr': 0.001,'final_lr':0.001},
-                {'params': myNet.subject_addblock.parameters(), 'lr': 0.001,'final_lr':0.001},
-                {'params': myNet.subject_domain_predictor.parameters(), 'lr': 0.00001/10,'final_lr':0.001/10},
-            ],lr=0.004)
+                {'params':myNet.extractor.parameters(),'lr':0.02,'final_lr':0.001},
+                {'params': myNet.subject_class_predictor.parameters(), 'lr': 0.02,'final_lr':0.001},
+                {'params': myNet.subject_addblock.parameters(), 'lr': 0.02,'final_lr':0.001},
+            ],lr=0.001)
             train_accuracy = []
             test_accuracy = []
             e_error = []

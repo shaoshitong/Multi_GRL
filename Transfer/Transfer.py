@@ -1,4 +1,5 @@
 import torch, math,random
+import numpy as np
 import torch.nn as nn
 import torch.nn.functional as F
 from einops import rearrange
@@ -59,16 +60,21 @@ class Multi_GRL(nn.Module):
         self.subject_nums = subject_nums
         self.subject_addblock=nn.ModuleList([])
         for i in range(subject_nums):
-            layer=nn.Linear(in_channels,512)
+            layer=nn.Linear(in_channels,256)
             self.subject_addblock.append(layer)
         self.subject_class_predictor=nn.ModuleList([])
         for i in range(subject_nums):
-            layer=nn.Sequential(nn.ReLU(inplace=False),nn.Linear(512,num_classes))
+            layer=nn.Sequential(nn.ReLU(inplace=False),nn.Linear(256,num_classes))
             self.subject_class_predictor.append(layer)
-        self.subject_domain_predictor=ResMLP(512,subject_nums)
+        # self.subject_domain_predictor=ResMLP(512,subject_nums)
         self.betas = 1
+        self.iter=0
+        self.TL_list=[i for i in range(self.subject_nums)]
+        self.TL_list2=[i for i in range(self.subject_nums-1)]
+        np.random.shuffle(self.TL_list)
+        np.random.shuffle(self.TL_list2)
 
-    def forward(self, x, y, subject_label, subject):
+    def forward(self, x, y, subject_label, subject,top_num=5):
         """
         :param x: 输入样本
         :param y: 情绪类别
@@ -77,35 +83,44 @@ class Multi_GRL(nn.Module):
         :param subject: 当前目标域身份
         :return: 在训练阶段会返回两个loss和一个correct,测试阶段只返回一个correct
         """
+
         x = self.extractor(x)
-        return self.TL(x,y,subject_label,subject)
-    def TL(self,x,y,subject_label,subject):
+        return self.TL(x,y,subject_label,subject,top_num)
+    def TL(self,x,y,subject_label,subject,top_num):
+        if self.iter%10==0:
+            np.random.shuffle(self.TL_list)
+            np.random.shuffle(self.TL_list2)
+            pass
+        self.iter+=1
         target_mask = torch.eq(torch.LongTensor([subject]).to(subject_label.device), subject_label)
         subject_batch_num = target_mask.sum().item()
         outs = []
-        for i in range(self.subject_nums):
+        TL_list=self.TL_list
+        TL_list2=self.TL_list2
+        np.random.shuffle(TL_list)
+        for i,t in enumerate(TL_list):
             if i == subject:
                 continue
             subject_x = x[i * subject_batch_num:(i + 1) * subject_batch_num]
-            subject_x = self.subject_addblock[i](subject_x)
+            subject_x = self.subject_addblock[t](subject_x)
             outs.append(subject_x)
         target_outs = []
-        for i in range(self.subject_nums):
+        for i,t in enumerate(TL_list):
             if i == subject:
                 continue
             subject_target = x[subject * subject_batch_num:(subject + 1) * subject_batch_num]
-            subject_target = self.subject_addblock[i](subject_target)
+            subject_target = self.subject_addblock[t](subject_target)
             target_outs.append(subject_target)
         logits = []
         target_logits = []
-        for i in range(self.subject_nums - 1):
+        for i,t in enumerate(TL_list2):
             subject_logit = outs[i]
             # subject_logit=x[i*subject_batch_num:(i+1)*subject_batch_num]
-            subject_logit = self.subject_class_predictor[i](subject_logit)
+            subject_logit = self.subject_class_predictor[t](subject_logit)
             logits.append(subject_logit)
             target_logit = target_outs[i]
             # target_logit=x[subject*subject_batch_num:(subject+1)*subject_batch_num]
-            target_logit = self.subject_class_predictor[i](target_logit)
+            target_logit = self.subject_class_predictor[t](target_logit)
             target_logits.append(target_logit)
         "====================================================MMD LOSS====================================================="
         mmd_loss = 0.
@@ -117,9 +132,9 @@ class Multi_GRL(nn.Module):
         disc_loss = 0.
         for i in range(self.subject_nums - 1):
             for j in range(i + 1, self.subject_nums - 1):
-                disc_loss = disc_loss + (F.softmax(outs[i], dim=1) - F.softmax(outs[j], dim=1)).abs().mean()
+                disc_loss = disc_loss + (F.softmax(target_outs[i], dim=1) - F.softmax(target_outs[j], dim=1)).abs().mean()
         disc_loss = disc_loss * 2 / ((self.subject_nums - 1) * (self.subject_nums - 2))
-        "====================================================CLS LOSS====================================================="
+        "====================================================CLS LOSS==================s==================================="
         count = 0
         cls_loss = 0.
         for i in range(self.subject_nums):
@@ -130,8 +145,13 @@ class Multi_GRL(nn.Module):
             cls_loss = cls_loss + crossentropy()(logits[count - 1], subject_target)
         cls_loss = cls_loss / (self.subject_nums - 1)
         "====================================================PRED ACC====================================================="
-        target_logit = torch.softmax(torch.stack(target_logits, -1), 1).mean(-1)
+        target_logits = torch.softmax(torch.stack(target_logits, -1), 1)
+        a,b=torch.max(target_logits,1)
+        value,index = torch.topk(a,top_num,1)
+        index=index.unsqueeze(1).expand(target_logits.shape[0],target_logits.shape[1],top_num)
+        target_logit=target_logits.gather(-1,index)
+        target_logit=target_logit.mean(-1)
         target_true = y[subject * subject_batch_num:(subject + 1) * subject_batch_num]
         pred = torch.eq(torch.argmax(target_logit, 1), torch.argmax(target_true, 1))
         pred, nums = pred.sum(), pred.shape[0]
-        return mmd_loss * 0.1, disc_loss * 0.4, cls_loss, pred, nums
+        return mmd_loss, disc_loss, cls_loss, pred, nums
